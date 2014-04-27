@@ -19,7 +19,7 @@ allSymbols = [Symbol i | i <- [0..]]
 newtype Namespace = Namespace {namespace :: Map String Symbol}
 newtype Symboltable a = Symboltable {symboltable :: Map Symbol SymbolData}
 
-data Lisp = Literal Literal | Cdr Lisp Lisp | Sym Symbol | Null | Empty
+data Lisp = Literal Literal | Cdr Lisp Lisp | Sym Symbol | Quote Lisp | Null | Empty
           deriving Show
 
 
@@ -58,8 +58,20 @@ symbol name = do
 read :: Monad m => Symbol -> Program m (Maybe SymbolData)
 read s = get >>= return . lookup s . symboltable 
 
+setExec :: Monad m => Symbol -> Exec -> Program m ()
+setExec s e = do
+  (Just (SymbolData i1 n1 v1 e1))  <- Symbol.read s
+  st <- return . symboltable =<< get
+  put $ Symboltable $ insert s (SymbolData i1 n1 v1 (Just e)) st
 
-runProgram :: Program Identity a -> a
-runProgram v = let (((q, _), _), _) = 
-                       runIdentity $ runStateT (runStateT (runStateT v (Symboltable empty)) (Namespace empty)) allSymbols in
-               q
+
+
+
+
+runProgram :: Monad m => Program m a -> m a
+runProgram v = do
+  (((q, _), _), _) <- runStateT (runStateT (runStateT v (Symboltable empty)) (Namespace empty)) allSymbols
+  return q
+
+runProgramId :: Program Identity a -> a
+runProgramId = runIdentity . runProgram

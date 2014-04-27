@@ -23,14 +23,18 @@ read_ebene a ('(':r) = do
   v1 <- str a
   (arr,n) <- read_ebene "" r
   (qr,f) <- read_ebene "" n
-  return (v1 ++ foldr Cdr Null arr : qr, f)
+  return (v1 ++ foldr Cdr Empty arr : qr, f)
+read_ebene a ('\'':r) = do
+  ((l1:rest),s) <- read_ebene "" r
+  q <- str a
+  return (q ++ [Quote l1] ++ rest, s)
 read_ebene a (k:r) = read_ebene (k:a) r
 
 readM :: Monad m => String -> Program m Lisp
--- readM (')':_) = return Null
+-- readM (')':_) = return Empty
 readM str = do
   (a,rest) <- read_ebene "" str
-  return $ foldr Cdr Null a
+  return $ foldr Cdr Empty a
 
 readR :: Monad m => String -> Program m Lisp
 readR s = readM (s ++ ")")

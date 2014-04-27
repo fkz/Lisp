@@ -15,7 +15,9 @@ data LispError =
   | NoValidList
   | SymbolExpected
   | StrangeSymbolError
-  | SymbolNotAFunction
+  | SymbolNotAFunction Symbol
+  | CantExecute
+    deriving Show
 
 type ProgramE m = EitherT LispError (Program m)
 
@@ -47,16 +49,47 @@ function (Cdr p code) = do
   parameter2 <- mapM genSym' parameter
   let newCode = foldl f code $ zip parameter (map Sym parameter2)
 
-  return $ parametrized $ return . foldl f newCode . zip parameter2
+  return $ parametrized $ executeMany . foldl f newCode . zip parameter2
                      
     where
       f code' (from, to) = replace code' from to
       toSym (Sym s) = Just s
       toSym _       = Nothing
 
+defun :: Exec
+defun = Exec q
+    where
+      q (Cdr (Sym name) rest) = function rest >>= lift . setExec name >> return Null
+      q _ = left NoValidList
+
 
 execute :: Monad m => Lisp -> ProgramE m Lisp
 execute (Cdr (Sym fun) rest) = lift (Symbol.read fun) >>=
                                maybe (left StrangeSymbolError) return >>=
-                               maybe (left SymbolNotAFunction) return . exec >>=
+                               maybe (left (SymbolNotAFunction fun)) return . exec >>=
                                flip runExec rest 
+execute (Quote a) = return a
+execute _ = left CantExecute
+
+executeMany :: Monad m => Lisp -> ProgramE m Lisp
+executeMany l = maybe (left NoValidList) return (toArray l) >>= 
+                (flip foldM Null $ \ _ b -> execute b)
+
+multiple :: Exec
+multiple = Exec executeMany
+-- multiple = parametrized $ flip foldM Null $ \ _ b -> execute b
+
+
+registerSymbol :: Monad m => String -> Exec -> ProgramE m ()
+registerSymbol name ex = lift $ symbol (reverse name) >>= flip setExec ex 
+
+help :: Exec
+help = Exec return
+
+
+basicProgram :: Monad m => ProgramE m ()
+basicProgram = mapM_ (uncurry registerSymbol)
+               [ ("defun", defun),
+                 ("genSym", genSym),
+                 ("multiple", multiple),
+                 ("help", help) ]
