@@ -64,12 +64,24 @@ defun = Exec q
 
 
 execute :: Monad m => Lisp -> ProgramE m Lisp
-execute (Cdr (Sym fun) rest) = lift (Symbol.read fun) >>=
-                               maybe (left StrangeSymbolError) return >>=
-                               maybe (left (SymbolNotAFunction fun)) return . exec >>=
-                               flip runExec rest 
+execute (Cdr (Sym fun) rest) = 
+    do
+      funSymbol <- lift (Symbol.read fun) >>= maybe (left StrangeSymbolError) return
+      exec <- maybe (left (SymbolNotAFunction fun)) return $ exec funSymbol
+      --rest' <- executeCdr rest
+      runExec exec rest
 execute (Quote a) = return a
 execute _ = left CantExecute
+
+
+executeCdr :: Monad m => Lisp -> ProgramE m Lisp
+executeCdr (Cdr a b) = do
+  aa <- execute a
+  bb <- executeCdr b
+  return $ Cdr aa bb
+executeCdr Empty = return Empty
+executeCdr _     = left NoValidList
+
 
 executeMany :: Monad m => Lisp -> ProgramE m Lisp
 executeMany l = maybe (left NoValidList) return (toArray l) >>= 
@@ -79,6 +91,17 @@ multiple :: Exec
 multiple = Exec executeMany
 -- multiple = parametrized $ flip foldM Null $ \ _ b -> execute b
 
+
+defmacro :: Exec
+defmacro = Exec q
+    where
+      q (Cdr (Sym name) rest) = do
+        f <- function rest
+        lift $ setExec name $ Exec $ runExec f >=> execute
+        return Null
+
+list :: Exec
+list = parametrized $ flip foldr (return Empty) $ \a b -> liftM2 Cdr (execute a) b
 
 registerSymbol :: Monad m => String -> Exec -> ProgramE m ()
 registerSymbol name ex = lift $ symbol (reverse name) >>= flip setExec ex 
@@ -92,4 +115,6 @@ basicProgram = mapM_ (uncurry registerSymbol)
                [ ("defun", defun),
                  ("genSym", genSym),
                  ("multiple", multiple),
-                 ("help", help) ]
+                 ("help", help),
+                 ("defmacro", defmacro),
+                 ("list", list)]
