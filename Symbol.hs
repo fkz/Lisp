@@ -7,6 +7,8 @@ import Control.Monad.State.Strict
 import Control.Monad.Trans
 import Data.Map.Strict
 import Control.Monad.Identity
+import Data.Maybe
+import Lisp
 import {-# SOURCE #-} Execute
 
 
@@ -19,12 +21,6 @@ allSymbols = [Symbol i | i <- [0..]]
 newtype Namespace = Namespace {namespace :: Map String Symbol}
 newtype Symboltable a = Symboltable {symboltable :: Map Symbol SymbolData}
 
-data Lisp = Literal Literal | Cdr Lisp Lisp | Sym Symbol | Quote Lisp | Null | Empty
-          deriving Show
-
-
-data Literal = Int Integer
-               deriving Show
 
 type Program m = StateT (Symboltable ()) (StateT Namespace (StateT [Symbol] m))
 
@@ -39,7 +35,7 @@ newUnintSymbol name = do
   var <- lift $ lift newVar
   let Symbol nr = var
   let nameA = name ++ "#" ++ show nr
-  modify (Symboltable . insert var (SymbolData var nameA Empty Nothing) . symboltable)
+  modify (Symboltable . insert var (SymbolData var nameA Null Nothing) . symboltable)
   return var
 
 symbol :: Monad m => String -> Program m Symbol
@@ -52,7 +48,7 @@ symbol name = do
           v <- (lift . lift) newVar
           lift $ put $ Namespace $ insert name v ns
           st <- return . symboltable =<< get
-          put $ Symboltable $ insert v (SymbolData v name Empty Nothing) st
+          put $ Symboltable $ insert v (SymbolData v name Null Nothing) st
           return v
 
 read :: Monad m => Symbol -> Program m (Maybe SymbolData)
@@ -64,6 +60,14 @@ setExec s e = do
   st <- return . symboltable =<< get
   put $ Symboltable $ insert s (SymbolData i1 n1 v1 (Just e)) st
 
+setVar :: Monad m => Symbol -> Lisp -> Program m ()
+setVar s v = do
+  (Just (SymbolData i1 n1 v1 e1))  <- Symbol.read s
+  st <- return . symboltable =<< get
+  put $ Symboltable $ insert s (SymbolData i1 n1 v e1) st
+
+getVar :: Monad m => Symbol -> Program m Lisp
+getVar = Symbol.read >=> return . var . fromJust
 
 
 

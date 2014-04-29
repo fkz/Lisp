@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types, ExistentialQuantification, DeriveDataTypeable #-}
+{-# LANGUAGE Rank2Types, ExistentialQuantification, DeriveDataTypeable, TupleSections #-}
 
 module Execute where
 
@@ -16,6 +16,7 @@ data LispError =
   | SymbolExpected
   | StrangeSymbolError
   | SymbolNotAFunction Symbol
+  | SymbolHasNoData Symbol
   | CantExecute
     deriving Show
 
@@ -46,10 +47,14 @@ genSym = parametrized q where
 function :: Monad m => Lisp -> ProgramE m Exec
 function (Cdr p code) = do
   parameter <- maybe (left NoValidList) return $ toArray p >>= sequence . map toSym
-  parameter2 <- mapM genSym' parameter
-  let newCode = foldl f code $ zip parameter (map Sym parameter2)
+  
+  return $ parametrized $ \arguments -> do
+    parameter2 <- mapM genSym' parameter
+    let newCode = foldl f code $ zip parameter (map Sym parameter2)
+    args <- sequence $ zipWith (\arg par -> execute arg >>= return . (, par)) arguments parameter2
+    mapM_ (\(value, symbol) -> lift $ setVar symbol value) args
 
-  return $ parametrized $ executeMany . foldl f newCode . zip parameter2
+    executeMany newCode
                      
     where
       f code' (from, to) = replace code' from to
@@ -71,6 +76,12 @@ execute (Cdr (Sym fun) rest) =
       --rest' <- executeCdr rest
       runExec exec rest
 execute (Quote a) = return a
+execute Empty = return Empty
+execute (Sym s) = do
+                    result <- lift $ getVar s
+                    case result of
+                        Null ->left (SymbolHasNoData s)
+                        otherwise -> return result
 execute _ = left CantExecute
 
 
@@ -97,8 +108,11 @@ defmacro = Exec q
     where
       q (Cdr (Sym name) rest) = do
         f <- function rest
-        lift $ setExec name $ Exec $ runExec f >=> execute
+        lift $ setExec name $ Exec $ (runExec f >=> execute) . dotfy
         return Null
+      dotfy :: Lisp -> Lisp
+      dotfy (Cdr a b) = Cdr (Quote a) (dotfy b)
+      dotfy r = r
 
 list :: Exec
 list = parametrized $ flip foldr (return Empty) $ \a b -> liftM2 Cdr (execute a) b
