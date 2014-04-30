@@ -13,6 +13,9 @@ import Control.Monad.Identity
 import qualified ArrayBuilder as B
 import Data.Char
 import System.IO
+import Control.Monad.Trans.Maybe
+import Control.Exception hiding (finally)
+import System.IO.Error
 
 -- a symbol is just an integer
 data Symbol = Symbol Int
@@ -31,7 +34,7 @@ data Lisp = Empty
           | Quote Lisp
   deriving Show
 
-data Literal = Str String | Int Integer | StrMap (Map String LispValue)
+data Literal = Str String | Int Integer | B Bool |  StrMap (Map String LispValue)
   deriving Show
 
 -- a value stored in a variable
@@ -65,7 +68,12 @@ data LispError =
  |LetParseError Lisp
  |Lisp_ArgumentListEmpty
  |SymbolNotValid Symbol
- deriving (Typeable, Show)
+ |CantAppendToNotRealList Lisp Lisp
+ |TooFewVariablesInFunctionApplication [Symbol] 
+ |TooMuchVariablesInFunctionApplication [LispValue]
+ |TooFewVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
+ |TooMuchVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
+  deriving (Typeable, Show)
 
 instance IsSignal LispError ()
 
@@ -193,33 +201,71 @@ executeList = lispToList >=> mapM execute
 executeMany :: Monad m => Lisp -> LispT r m LispValue
 executeMany = executeList >=> return . last
 
+
+makeSpecial :: (forall r m. Monad m => [Lisp] -> LispT r m LispValue) -> Maybe Int -> Maybe Int -> LispExecute
+makeSpecial fun minParam maxParam = Special $ \ lisp -> do
+                                      l <- executeList lisp
+                                      ll <- assertBound l minParam maxParam
+                                      fun =<< mapM (convertFromLisp "") ll
+      where 
+        assertBound :: Monad m => [LispValue] -> Maybe Int -> Maybe Int -> LispT r m [LispValue]
+        assertBound l a b = (case a of
+                              Just i -> if length l < i then
+                                            signal $ TooFewVariablesInFunctionApplicationSpecial l a b
+                                        else
+                                            return () 
+                              Nothing -> return ()) >>
+                            (case b of
+                              Just i -> if length l < i then
+                                            signal $ TooMuchVariablesInFunctionApplicationSpecial l a b
+                                        else
+                                            return ()
+                              Nothing -> return ()) >>
+                            return l
+
+
   
 interpreteFunction :: Monad m => LexicalScope -> Lisp -> [Symbol] -> Lisp -> LispT r m LispValue
 interpreteFunction scope fun param_names param = do
   params <- executeList param
-  withLexicalScope scope $ 
-   zipWithM_ setVar param_names params >> executeMany fun
+  withLexicalScope scope $
+   introduceParams param_names params  >> executeMany fun
 
 interpreteFunctionMacro :: Monad m => LexicalScope -> Lisp -> [Symbol] -> Lisp -> LispT r m LispValue
 interpreteFunctionMacro scope fun param_names param = do
   params <- lispToList param
   withLexicalScope scope $ 
-   zipWithM_ setVar param_names (Variable <$> params) >> executeMany fun
+   introduceParams param_names (Variable <$> params) >> executeMany fun
 
 
-compile :: Monad m => Lisp -> LispT r m Lisp
-compile (Cdr (Cdr q@(Sym a) b) r) = flip Cdr <$> compile r <*> do
+introduceParams :: Monad m => [Symbol] -> [LispValue] -> LispT r m ()
+introduceParams [] [] = return ()
+introduceParams (rest : s : []) r | rest == restSymbol = 
+  setVar s =<< Variable . listToLisp <$> mapM (convertFromLisp "rest arguments have to be Lisp") r
+introduceParams (s : r) (v : r') = setVar s v >> introduceParams r r'
+introduceParams s [] = signal (TooFewVariablesInFunctionApplication s)
+introduceParams [] s = signal (TooMuchVariablesInFunctionApplication s)
+
+
+-- bool : is top level ?
+compile :: Monad m => Bool -> Lisp -> LispT r m Lisp
+compile True l@(Cdr q@(Sym a) b) = macroexpand l
+compile _ (Cdr l@(Cdr q@(Sym a) b) r) = flip Cdr <$> compile False r <*> macroexpand l
+compile _ (Cdr a b) = Cdr <$> compile False a <*> compile False b
+compile _ q = return q                
+
+
+macroexpand (Cdr q@(Sym a) b) = do
   f <- registerHandler ifExists $ getVar a >>= return . Just
   case f of
-    Just (Macro le) -> convertFromLisp "macro expanding" =<< executeLisp le b
-    _ -> Cdr <$> compile q <*> compile b
-    where
-      ifExists sig = 
-          case sig of
-            SymbolNotFound _ -> return (Abort Nothing)
-            _ -> return NotHandled
-compile (Cdr a b) = Cdr <$> compile a <*> compile b
-compile q = return q                
+    Just (Macro le) -> compile True  =<< convertFromLisp "macro expanding" =<< executeLisp le b
+    _ -> Cdr <$> compile False q <*> compile False b
+      
+  where
+    ifExists sig = 
+        case sig of
+          SymbolNotFound _ -> return (Abort Nothing)
+          _ -> return NotHandled
 
 
 letExpr :: Monad m => [(Symbol,LispValue)] -> LispT r m a -> LispT r m a
@@ -286,6 +332,21 @@ list_ = Special $ \ lisp -> do
     list_toLisp (a : b : r) = Cdr a <$> list_toLisp (b : r)
     list_toLisp [a] = return a
 
+concatSpecial :: LispExecute
+concatSpecial = Special $ \ lisp -> do
+                  args <- executeList lisp >>= mapM (convertFromLisp "concatenate parameter must evaluate to Lisp")
+                  Variable <$> concatenateLisp args
+
+
+concatenateLisp :: Monad m => [Lisp] -> LispT r m Lisp
+concatenateLisp [] = return Empty
+concatenateLisp [a] = return a
+concatenateLisp (a : r) = appendBack a =<< concatenateLisp r
+  where
+    appendBack Empty l = return l
+    appendBack (Cdr a b) l = Cdr a <$> appendBack b l
+    appendBack q l = signal (CantAppendToNotRealList q l) $> Empty
+
 listToLisp :: [Lisp] -> Lisp
 listToLisp = foldr Cdr Empty
 
@@ -308,14 +369,45 @@ halfQuoteSpecial = Special (return . Variable <=< qq)
                $ Just <$> lispToList lisp
         case arr of
           Nothing -> return . Quote $ lisp
-          Just arri -> listToLisp . (Sym listSymbol :) <$> mapM quote2 arri
-      quote2 (Cdr (Sym (Symbol 4)) q) = return q
-      quote2 q = qq q
+          Just arri -> do
+                   syms <- mapM quote2 arri
+                   let sA = combineSymbols syms
+                   case sA of
+                     [a] -> return $ codeFor a
+                     l   -> return $ listToLisp . (Sym concatSymbol :) $ map codeFor l
+
+      quote2 (Cdr (Sym (Symbol 4)) q) = return (Left q)
+      quote2 (Cdr (Sym (Symbol 8)) q) = return (Right q)
+      quote2 q = Left <$> qq q
+
+      combineSymbols :: [Either Lisp Lisp] -> [Either [Lisp] Lisp]
+      combineSymbols = foldr f [Left []]
+      f (Left a) (Left b : r) = Left (a : b) : r
+      f (Left a) (Right b : r) = Left [a] : Right b : r
+      f (Right a) (Left [] : r) = Right a : r
+      f (Right a) (b : r) = Right a : b : r
+
+      codeFor (Right a) = a
+      codeFor (Left a) = listToLisp . (Sym listSymbol :) $ a
                      
-                     
+
+macroexpandSpecial :: LispExecute
+macroexpandSpecial = Special $ (Variable <$>) . compile True
+
+
+catSpecial :: LispExecute
+catSpecial = makeSpecial (\[Cdr a b] -> return (Variable a)) (Just 1) (Just 1)
+
+cdrSpecial :: LispExecute
+cdrSpecial = makeSpecial (\[Cdr a b] -> return (Variable b)) (Just 1) (Just 1)
+
+listpSpecial :: LispExecute
+listpSpecial = makeSpecial (\[a] -> return $ Variable $ case a of Cdr _ _ -> Lit (B True) ; _ -> Lit (B False)) (Just 1) (Just 1)
 
 symbolList :: Symbol
 symbolList = Symbol 0
+
+concatSymbol = Symbol 9
 
 standardErrorSymbol :: Symbol
 standardErrorSymbol = Symbol 1
@@ -332,12 +424,16 @@ halfQuoteSymbol = Symbol 3
 unQuoteSymbol :: Symbol
 unQuoteSymbol = Symbol 4
 
+unQuoteListSymbol :: Symbol
+unQuoteListSymbol = Symbol 8
+
 listSymbol = Symbol 7
 
+restSymbol = Symbol 5
 
 halfQuote a = Cdr (Sym halfQuoteSymbol) a
 unQuote   a = Cdr (Sym unQuoteSymbol) a
-
+unQuoteList a = Cdr (Sym unQuoteListSymbol) a
 
 addFunction :: String -> LispExecute -> Monad m => LispT r m ()
 addFunction s l = do
@@ -352,6 +448,8 @@ startEnvironment = do
   setVar symbolCount (convertToLisp (10 :: Int))
   setVar paramVariable NoValue
 
+  mapM_ (\(n, s) -> setSymbolData (SymbolData n) s) startList'
+
   mapM_ (uncurry addFunction) funs 
 
   setVar halfQuoteSymbol (Macro halfQuoteSpecial)
@@ -362,7 +460,13 @@ startEnvironment = do
       startList' = [("SymbolList", symbolList),
                    ("SymbolCount", symbolCount),
                    ("$", paramVariable),
-                   ("list", listSymbol)]
+                   ("list", listSymbol),
+                   ("`", halfQuoteSymbol),
+                   ("@", unQuoteListSymbol),
+                   (",", unQuoteSymbol),
+                   ("concat", concatSymbol),
+                   ("&rest", restSymbol)]
+
       funs = [("printS", printSpecial),
               ("let", letSpecial),
               ("lambda", lambdaSpecial),
@@ -370,7 +474,9 @@ startEnvironment = do
               ("set", setSpecial),
               ("quote", quote),
               ("list", list),
-              ("list*", list_)]
+              ("list*", list_),
+              ("concat", concatSpecial),
+              ("macroexpand", macroexpandSpecial)]
 
 runLispT :: Monad m => LispT r m r -> m r
 runLispT l = return . fst =<< runStateT (runCodeT l) (LexicalScope M.empty, M.empty)
@@ -418,6 +524,11 @@ read_ebene a (',':r) b = do
   (l1:rest,s) <- read_ebene "" r b
   q <- str a
   return (q ++ [unQuote l1] ++ rest, s)
+read_ebene a ('@':r) b = do
+  (l1:rest,s) <- read_ebene "" r b
+  q <- str a
+  return (q ++ [unQuoteList l1] ++ rest, s)
+read_ebene a ('#':r) b = read_ebene a [] b
 read_ebene "" q@(z:r) b | isDigit z = let (number, rest) = readInt 0 q in do
                                       (a, b) <- read_ebene "" rest b
                                       return (Lit (Int number) : a, b)
@@ -436,9 +547,11 @@ readM str = do
 readR :: Monad m => String -> LispT r m Lisp
 readR s = readM (s ++ ")")
 
-readS :: Monad m => String -> LispT r m Lisp
-readS = (head . fst <$>) . flip (read_ebene "") False
-
+readS :: Monad m => String -> LispT r m (Maybe Lisp)
+readS = (headMaybe . fst <$>) . flip (read_ebene "") False
+  where
+    headMaybe [] = Nothing
+    headMaybe (a:_) = Just a
 
 printLisp :: Monad m => Lisp -> LispT r m String
 printLisp Empty = return ""
@@ -463,28 +576,33 @@ printLispListe (Cdr a b) = do
 printLispListe (Quote a) = printLisp a >>= \l -> (return $ " : '" ++ l ++ ")")
 
 run :: String -> Either LispError LispValue
-run s = runLisp $ startEnvironment >> readR s >>= compile >>= executeMany
+run s = runLisp $ startEnvironment >> readR s >>= compile False >>= executeMany
 
 data Quit = Quit deriving Typeable
 instance IsSignal Quit ()
 
+boolToMaybe :: Bool -> Maybe ()
+boolToMaybe True = Just ()
+boolToMaybe False = Nothing
+
 nextRepl :: LispT r IO ()
 nextRepl = do
   liftIO $ putStr ">" >> hFlush stdout
-  str <- liftIO getLine
+  str <- liftIO $ handleJust (boolToMaybe . isEOFError) (return . const "quit") getLine
   if str == "quit" then
       signal Quit
   else if str == "abort" then
-           return ()
+     return ()
   else 
       registerHandlerT (undefined :: LispError)
            ((Abort () <$) . liftIO . print) $
       registerHandlerT NotFinnishedReading 
            (const $ liftIO $ putStr "==>" >> hFlush stdout >> Continue <$> getLine) $
-       readS str >>= 
-       compile >>= 
-       execute >>= 
-       lispToString >>= 
+      void $ runMaybeT $
+       MaybeT (readS str) >>= 
+       lift . compile True >>= 
+       lift . execute >>= 
+       lift . lispToString >>= 
        liftIO . putStr >> 
        liftIO (putStrLn "")
           where
