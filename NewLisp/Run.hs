@@ -64,7 +64,11 @@ startEnvironment = do
               ("list", list),
               ("list*", list_),
               ("concat", concatSpecial),
-              ("macroexpand", macroexpandSpecial)]
+              ("macroexpand", macroexpandSpecial),
+              ("cond", condSpecial),
+              ("cat", catSpecial),
+              ("cdr", cdrSpecial),
+              ("listp", listpSpecial)]
 
 runLispT :: Monad m => LispT r m r -> m r
 runLispT l = return . fst =<< runStateT (runCodeT l) (LexicalScope M.empty, M.empty)

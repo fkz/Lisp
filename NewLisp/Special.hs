@@ -14,6 +14,8 @@ import qualified Data.Map.Strict as M
 import Data.Functor
 import Data.Typeable
 import Control.Monad
+import Control.Monad.Trans.Either
+import Control.Monad.Trans
 
 
 
@@ -91,6 +93,19 @@ macroLambdaSpecial = Special $ \ lisp -> do
                   pList <- lispToList par
                   params <- mapM (convertFromLisp "macro lambda arg list") (map Variable pList)
                   return $ Macro $ InterpretedMacroFunction scope params body
+
+condSpecial :: LispExecute
+condSpecial = Special $ \ lisp -> do
+                list <- lispToList lisp
+                eitherT return (const (return NoValue)) 
+                      $ foldl next (right ()) list 
+     where
+       next previous now = previous >> do
+                                    [cond, anw] <- lift $ lispToList now
+                                    res <- lift $ execute cond
+                                    case res of
+                                      Variable (Lit (B False)) -> right ()
+                                      _ -> left =<< lift (execute anw)
 
 
 quote = makeSpecial (\[val] -> return $ Variable (Quote val)) (Just 1) (Just 1)
