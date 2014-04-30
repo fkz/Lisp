@@ -12,6 +12,7 @@ import Data.Functor
 import Control.Monad.Identity
 import qualified ArrayBuilder as B
 import Data.Char
+import System.IO
 
 -- a symbol is just an integer
 data Symbol = Symbol Int
@@ -63,6 +64,7 @@ data LispError =
  |NoMacroExpansion LispExecute Lisp
  |LetParseError Lisp
  |Lisp_ArgumentListEmpty
+ |SymbolNotValid Symbol
  deriving (Typeable, Show)
 
 instance IsSignal LispError ()
@@ -116,6 +118,23 @@ newSymbol s = do
 setSymbolData :: Monad m => SymbolData -> Symbol -> LispT r m ()
 setSymbolData d symbol = do
   state $ \ (a, m) -> ((), (a, M.insert symbol d m))
+
+getName :: Monad m => Symbol -> LispT r m String
+getName s = do
+  (_, d) <- get
+  case M.lookup s d of
+    Just j -> return (name j)
+    Nothing -> signal (SymbolNotValid s) $> ""
+
+getReadableUniqueName :: Monad m => Symbol -> LispT r m String
+getReadableUniqueName s = do
+  name <- getName s
+  s' <- getSymbol name
+  if s == s' then
+      return name
+  else
+      return $ "#" ++ show s ++ name
+
 
 -- the reader : is saved in the 0-th symbol
 getSymbol :: Monad m => String -> LispT r m Symbol
@@ -277,7 +296,23 @@ instance IsSignal Print ()
 
 printSpecial :: LispExecute
 printSpecial = Special $ \ lisp -> signal (Print "Hallo") $> NoValue
-   
+
+halfQuoteSpecial :: LispExecute
+halfQuoteSpecial = Special (return . Variable <=< qq)
+    where
+      qq lisp = do
+        arr <- registerHandler 
+                (\ s -> case s of
+                          NoRealList _ -> return (Abort Nothing)
+                          _ -> return NotHandled) 
+               $ Just <$> lispToList lisp
+        case arr of
+          Nothing -> return . Quote $ lisp
+          Just arri -> listToLisp . (Sym listSymbol :) <$> mapM quote2 arri
+      quote2 (Cdr (Sym (Symbol 4)) q) = return q
+      quote2 q = qq q
+                     
+                     
 
 symbolList :: Symbol
 symbolList = Symbol 0
@@ -291,6 +326,17 @@ symbolCount = Symbol 2
 paramVariable :: Symbol
 paramVariable = Symbol 3
 
+halfQuoteSymbol :: Symbol
+halfQuoteSymbol = Symbol 3
+
+unQuoteSymbol :: Symbol
+unQuoteSymbol = Symbol 4
+
+listSymbol = Symbol 7
+
+
+halfQuote a = Cdr (Sym halfQuoteSymbol) a
+unQuote   a = Cdr (Sym unQuoteSymbol) a
 
 
 addFunction :: String -> LispExecute -> Monad m => LispT r m ()
@@ -308,12 +354,15 @@ startEnvironment = do
 
   mapM_ (uncurry addFunction) funs 
 
+  setVar halfQuoteSymbol (Macro halfQuoteSpecial)
+
 
     where
       startList = flip map startList' $ \(a, b) -> (a, Variable $ Sym b)
       startList' = [("SymbolList", symbolList),
                    ("SymbolCount", symbolCount),
-                   ("$", paramVariable)]
+                   ("$", paramVariable),
+                   ("list", listSymbol)]
       funs = [("printS", printSpecial),
               ("let", letSpecial),
               ("lambda", lambdaSpecial),
@@ -343,41 +392,57 @@ str :: Monad m => String -> LispT r m [Lisp]
 str "" = return []
 str a = getSymbol (reverse a) >>= \g -> return [Sym g]
 
-read_ebene :: Monad m => String -> String -> LispT r m ([Lisp], String)
-read_ebene a (')':r) = str a >>= \x -> return (x, r)
-read_ebene a (white:r) | whitespace white = do
-  (l,s) <- read_ebene "" r
+data NotFinnishedReading = NotFinnishedReading deriving Typeable
+instance IsSignal NotFinnishedReading String
+
+read_ebene :: Monad m => String -> String -> Bool -> LispT r m ([Lisp], String)
+read_ebene a (')':r) _ = str a >>= \x -> return (x, r)
+read_ebene a (white:r) b | whitespace white = do
+  (l,s) <- read_ebene "" r b
   q <- str a
   return (q ++ l, s)
-read_ebene a ('(':r) = do
+read_ebene a ('(':r) b = do
   v1 <- str a
-  (arr,n) <- read_ebene "" r
-  (qr,f) <- read_ebene "" n
+  (arr,n) <- read_ebene "" r True
+  (qr,f) <- read_ebene "" n b
   return (v1 ++ foldr Cdr Empty arr : qr, f)
-read_ebene a ('\'':r) = do
-  (l1:rest,s) <- read_ebene "" r
+read_ebene a ('\'':r) b = do
+  (l1:rest,s) <- read_ebene "" r b
   q <- str a
   return (q ++ [Quote l1] ++ rest, s)
-read_ebene "" q@(z:r) | isDigit z = let (number, rest) = readInt 0 q in do
-                                      (a, b) <- read_ebene "" rest
+read_ebene a ('`':r) b = do
+  (l1:rest,s) <- read_ebene "" r b
+  q <- str a
+  return (q ++ [halfQuote l1] ++ rest, s)
+read_ebene a (',':r) b = do
+  (l1:rest,s) <- read_ebene "" r b
+  q <- str a
+  return (q ++ [unQuote l1] ++ rest, s)
+read_ebene "" q@(z:r) b | isDigit z = let (number, rest) = readInt 0 q in do
+                                      (a, b) <- read_ebene "" rest b
                                       return (Lit (Int number) : a, b)
      where readInt a (z:q) | isDigit z = readInt (10 * a + toInteger (digitToInt z)) q  
            readInt a b = (a, b) 
-read_ebene a (k:r) = read_ebene (k:a) r
+read_ebene a (k:r) b = read_ebene (k:a) r b
+read_ebene a [] True = signal NotFinnishedReading >>= flip (read_ebene a) True . (' ' :)
+read_ebene a [] False = str a >>= \x -> return (x, [])
 
 readM :: Monad m => String -> LispT r m Lisp
 -- readM (')':_) = return Empty
 readM str = do
-  (a,rest) <- read_ebene "" str
+  (a,rest) <- read_ebene "" str True
   return $ foldr Cdr Empty a
 
 readR :: Monad m => String -> LispT r m Lisp
 readR s = readM (s ++ ")")
 
+readS :: Monad m => String -> LispT r m Lisp
+readS = (head . fst <$>) . flip (read_ebene "") False
+
 
 printLisp :: Monad m => Lisp -> LispT r m String
 printLisp Empty = return ""
-printLisp (Sym (Symbol i)) = return $ "S" ++ show i
+printLisp (Sym s) = getReadableUniqueName s
 printLisp (Lit l) = return $ show l
 printLisp (Cdr a b) = do
   aa <- printLisp a
@@ -397,20 +462,40 @@ printLispListe (Cdr a b) = do
   return $ " " ++ aa ++ bb
 printLispListe (Quote a) = printLisp a >>= \l -> (return $ " : '" ++ l ++ ")")
 
-
 run :: String -> Either LispError LispValue
 run s = runLisp $ startEnvironment >> readR s >>= compile >>= executeMany
 
+data Quit = Quit deriving Typeable
+instance IsSignal Quit ()
+
 nextRepl :: LispT r IO ()
 nextRepl = do
-  liftIO $ putStr ">"
+  liftIO $ putStr ">" >> hFlush stdout
   str <- liftIO getLine
-  registerHandler (\a -> liftIO (print (a :: LispError)) $> Abort ()) $
-    readR str >>= compile >>= executeMany >>= liftIO . print >> liftIO (putStrLn "")
+  if str == "quit" then
+      signal Quit
+  else if str == "abort" then
+           return ()
+  else 
+      registerHandlerT (undefined :: LispError)
+           ((Abort () <$) . liftIO . print) $
+      registerHandlerT NotFinnishedReading 
+           (const $ liftIO $ putStr "==>" >> hFlush stdout >> Continue <$> getLine) $
+       readS str >>= 
+       compile >>= 
+       execute >>= 
+       lispToString >>= 
+       liftIO . putStr >> 
+       liftIO (putStrLn "")
+          where
+            lispToString (Variable w) = printLisp w
+            lispToString q = return $ show q
+
 
 
 repl :: IO ()
 repl = runLispT $ do
          startEnvironment
-         forever nextRepl
+         registerHandlerT Quit (const $ return $ Abort ()) $
+           forever nextRepl
 

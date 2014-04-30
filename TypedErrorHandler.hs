@@ -13,6 +13,7 @@ module TypedErrorHandler
      IsSignal,
      signal,
      registerHandler,
+     registerHandlerT,
      EH.finally,
      SignalResult(..),
      EH.runCodeT,
@@ -61,6 +62,8 @@ instance Monad m => Sig (SigT r m) where
           convertSignal (Continue a) = Continue (return (Value a))
           convertSignal (Abort c) = Abort c
 
+registerHandlerT :: (Sig m, IsSignal signal value) => signal -> (signal -> m (SignalResult value c)) -> m c -> m c
+registerHandlerT = const registerHandler
 
 
 data SampleError =
