@@ -17,92 +17,17 @@ import Control.Monad.Trans.Maybe
 import Control.Exception hiding (finally)
 import System.IO.Error
 
--- a symbol is just an integer
-data Symbol = Symbol Int
-  deriving (Ord, Eq, Show)
-data SymbolData = SymbolData { name :: String }
 
 
 -- the currently available symbols
-data LexicalScope = LexicalScope { variables :: Map Symbol LispValue }
 
 
-data Lisp = Empty
-          | Cdr Lisp Lisp
-          | Sym Symbol
-          | Lit Literal
-          | Quote Lisp
-  deriving Show
-
-data Literal = Str String | Int Integer | B Bool |  StrMap (Map String LispValue)
-  deriving Show
-
--- a value stored in a variable
-data LispValue = NoValue | 
-                 Variable Lisp |
-                 Execute LispExecute |
-                 Macro LispExecute |
-                 SymbolMacro
-  deriving Show
-
-data LispExecute = Special (forall r m . Monad m => Lisp -> LispT r m LispValue) | --TODO: get r m more front
-                   InterpretedFunction LexicalScope [Symbol] Lisp
-                  |InterpretedMacroFunction LexicalScope [Symbol] Lisp 
-
-instance Show LispExecute where
-    show (Special _) = "<Special>"
-    show (InterpretedFunction _ p l) = "InterpretedFunction <..> " ++ show p ++ " -> " ++  show l
-    show (InterpretedMacroFunction _ p l) = "InterpretedMacroFunction <..> " ++ show p ++ "->" ++ show l
-
-type LispT r m = SigT r (StateT (LexicalScope, Map Symbol SymbolData) m)
 
 
-data LispError =
-  SymbolNotFound Symbol
- |TypeMismatch LispValue String
- |CreateNewSymbol String Symbol
- |NoExecute Symbol LispValue Lisp
- |ListNotStartWithSymbol Lisp
- |NoRealList Lisp
- |NoMacroExpansion LispExecute Lisp
- |LetParseError Lisp
- |Lisp_ArgumentListEmpty
- |SymbolNotValid Symbol
- |CantAppendToNotRealList Lisp Lisp
- |TooFewVariablesInFunctionApplication [Symbol] 
- |TooMuchVariablesInFunctionApplication [LispValue]
- |TooFewVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
- |TooMuchVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
-  deriving (Typeable, Show)
-
-instance IsSignal LispError ()
 
 ($>) :: Functor f => f b -> a -> f a
 ($>) = flip (<$)
 
-class FromToLisp a where
-    convertFromLisp :: Monad m => String -> LispValue -> LispT r m a
-    convertToLisp :: a -> LispValue
-
-instance FromToLisp Int where
-    convertFromLisp _ (Variable (Lit (Int i))) = return (fromInteger i)
-    convertFromLisp s v = signal (TypeMismatch v s) $> 0
-    convertToLisp = Variable . Lit . Int . toInteger
-
-instance FromToLisp (Map String LispValue) where
-    convertFromLisp _ (Variable (Lit (StrMap i))) = return i
-    convertFromLisp s v = signal (TypeMismatch v s) $> M.empty
-    convertToLisp = Variable . Lit . StrMap
-
-instance FromToLisp Symbol where
-    convertFromLisp _ (Variable (Sym s)) = return s
-    convertFromLisp s v = signal (TypeMismatch v s) $> standardErrorSymbol
-    convertToLisp = Variable . Sym
-
-instance FromToLisp Lisp where
-    convertFromLisp _ (Variable s) = return s
-    convertFromLisp s v = signal (TypeMismatch v s) $> Empty
-    convertToLisp = Variable
 
 getVar :: Monad m => Symbol -> LispT r m LispValue
 getVar s = do

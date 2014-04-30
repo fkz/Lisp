@@ -38,3 +38,5 @@ from z fun = let (a, list, l) = fun z in
 to :: ParseTree a l -> (a -> [z] -> l -> z) -> z
 to (ParseTree a l b) con = con a (map (flip to con) l) b
 
+
+-- work with a parse tree

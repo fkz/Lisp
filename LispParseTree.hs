@@ -13,4 +13,3 @@ data Lisp = Sym Symbol
 
 data LispConstructors = CSym | CEmpty | CLiteral | CCdr
   deriving Enum
-          
