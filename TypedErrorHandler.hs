@@ -4,13 +4,16 @@
   FunctionalDependencies,
   TypeSynonymInstances,
   FlexibleInstances,
-  GeneralizedNewtypeDeriving #-}
+  GeneralizedNewtypeDeriving,
+  NoMonomorphismRestriction #-}
 
 
 module TypedErrorHandler 
-    (IsSignal,
+    (SigT,
+     IsSignal,
      signal,
      registerHandler,
+     EH.finally,
      SignalResult(..),
      EH.runCodeT,
      EH.runCode) where
@@ -24,25 +27,30 @@ import Control.Monad.Trans.State
 import Control.Monad.Trans
 import Control.Monad.Cont
 
+
 class (Typeable signal) => IsSignal signal value | signal -> value where
 
 
 data Signal = forall a b . IsSignal a b => Signal a
 data Value  = forall a . Value a
 
-type SigT r m = EH.SignalingCodeT (m Signal) (m Value) r m
+type SigT r m = EH.SignalingCodeT Signal (m Value) r m
 
-newtype SigTS s r m a = SigTS (EH.SignalingCodeT (Signal, s) (Value, s) r m a)
-    deriving (Monad, MonadTrans, MonadCont)
 
 class Monad m => Sig m where
     signal :: IsSignal signal value => signal -> m value
     registerHandler :: IsSignal signal value => (signal -> m (SignalResult value c)) -> m c -> m c
 
-instance Sig (SigT r m) where
-    signal s = (EH.signal (Signal s)) >>= unValue
+
+instance Monad m => Sig (SigT r m) where
+    signal s = 
+        do
+          mValue <- (EH.signal (Signal s))
+          value <- lift mValue
+          return $ unValue value
         where
           unValue (Value a) = unsafeCoerce a
+
 
     registerHandler errorHandler normalCode = EH.registerHandler errorHandler' normalCode
         where
@@ -50,15 +58,21 @@ instance Sig (SigT r m) where
                                        Nothing -> return NotHandled
                                        Just signal -> errorHandler signal >>= return . convertSignal
           convertSignal NotHandled = NotHandled
-          convertSignal (Continue a) = Continue (Value a)
+          convertSignal (Continue a) = Continue (return (Value a))
           convertSignal (Abort c) = Abort c
 
 
 
---instance Sig m => Sig (StateT s m) where
---    signal = lift . signal
---    registerHandler handler normal = 
---        State $ \oldstate -> do
---          registerHandler
---            (\signal -> runStateT (handler signal) oldstate
---        do
+data SampleError =
+  SampleError0
+ |NoRealError
+ |Success
+   deriving (Typeable, Show)
+
+instance IsSignal SampleError String
+
+
+testCode :: Monad m => SigT r m String
+testCode = registerHandler 
+              (\ e -> return $ Continue $ show (e :: SampleError)) 
+            (signal SampleError0 >> return "Bestanden")

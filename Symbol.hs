@@ -12,8 +12,6 @@ import Lisp
 import {-# SOURCE #-} Execute
 
 
-newtype Symbol = Symbol Integer
-    deriving (Eq, Ord, Show)
 data SymbolData = SymbolData { ident :: Symbol, name :: String, var :: Lisp, exec :: Maybe Exec }
 
 allSymbols = [Symbol i | i <- [0..]]
