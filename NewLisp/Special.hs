@@ -18,12 +18,11 @@ import Control.Monad.Trans.Either
 import Control.Monad.Trans
 
 
-
-makeSpecial :: (forall r m. Monad m => [Lisp] -> LispT r m LispValue) -> Maybe Int -> Maybe Int -> LispExecute
-makeSpecial fun minParam maxParam = Special $ \ lisp -> do
-                                      l <- executeList lisp
-                                      ll <- assertBound l minParam maxParam
-                                      fun =<< mapM (convertFromLisp "parameters ... ") ll
+makeSpecial1 :: Maybe Int -> Maybe Int -> (forall r m. Monad m => [LispValue] -> LispT r m LispValue) -> LispExecute
+makeSpecial1 minParam maxParam fun = Special $ \ lisp -> do
+                                       l <- executeList lisp
+                                       ll <- assertBound l minParam maxParam
+                                       fun ll
       where 
         assertBound :: Monad m => [LispValue] -> Maybe Int -> Maybe Int -> LispT r m [LispValue]
         assertBound l a b = (case a of
@@ -40,10 +39,8 @@ makeSpecial fun minParam maxParam = Special $ \ lisp -> do
                               Nothing -> return ()) >>
                             return l
 
-
-  
-
-
+makeSpecial :: (forall r m. Monad m => [Lisp] -> LispT r m LispValue) -> Maybe Int -> Maybe Int -> LispExecute
+makeSpecial fun minParam maxParam = makeSpecial1 minParam maxParam (mapM (convertFromLisp "parameters ... ") >=> fun)
 
 
 
@@ -68,11 +65,15 @@ letSpecial = Special $ \ lisp -> do
           (,) a <$> execute l
 
 setSpecial :: LispExecute
-setSpecial = Special $ \ lisp -> do
+setSpecial =  makeSpecial1  (Just 2) (Just 2) $ \ [var, l] ->
+                 convertFromLisp "has to be symbol" var 
+                    >>= flip setDynamicVar l >> return l
+
+{-Special $ \ lisp -> do
                [Sym var, l] <- lispToList lisp
                result <- execute l
-               setVar var result
-               return result
+               setDynamicVar var result
+               return result-}
 
 getCdr q@(Cdr a b) = return q
 getCdr q = signal (LetParseError q) $> Empty
@@ -171,8 +172,12 @@ halfQuoteSpecial = Special (return . Variable <=< qq)
                      
 
 macroexpandSpecial :: LispExecute
-macroexpandSpecial = Special $ (Variable <$>) . compile True
+macroexpandSpecial = makeSpecial (\[q] -> Variable <$> compile True q) (Just 1) (Just 1)
 
+
+genSymSpecial :: LispExecute
+genSymSpecial = makeSpecial1 (Just 1) (Just 1)
+                (\[a] -> (Variable . Sym <$>) . newSymbol =<< convertFromLisp "sym is no string" a)
 
 catSpecial :: LispExecute
 catSpecial = makeSpecial (\[Cdr a b] -> return (Variable a)) (Just 1) (Just 1)
@@ -182,6 +187,10 @@ cdrSpecial = makeSpecial (\[Cdr a b] -> return (Variable b)) (Just 1) (Just 1)
 
 listpSpecial :: LispExecute
 listpSpecial = makeSpecial (\[a] -> return $ Variable $ case a of Cdr _ _ -> Lit (B True) ; _ -> Lit (B False)) (Just 1) (Just 1)
+
+emptypSpecial = makeSpecial (\[a] -> return $ Variable $ case a of Empty -> Lit (B True) ; _ -> Lit (B False)) (Just 1) (Just 1)
+
+symbolInt = makeSpecial (\[a] -> Variable . Sym . Symbol <$> convertFromLisp "int expected" (Variable a)) (Just 1) (Just 1) 
 
 
 halfQuote a = Cdr (Sym halfQuoteSymbol) a

@@ -53,6 +53,8 @@ introduceParams [] s = signal (TooMuchVariablesInFunctionApplication s)
 
 -- bool : is top level ?
 compile :: Monad m => Bool -> Lisp -> LispT r m Lisp
+compile True (Cdr q@(Sym compExe) b) | compExe == executeCompileTime  
+                 = compile True b >>= \s -> execute s >> return s 
 compile True l@(Cdr q@(Sym a) b) = macroexpand l
 compile _ (Cdr l@(Cdr q@(Sym a) b) r) = flip Cdr <$> compile False r <*> macroexpand l
 compile _ (Cdr a b) = Cdr <$> compile False a <*> compile False b

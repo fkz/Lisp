@@ -13,9 +13,6 @@ standardErrorSymbol = Symbol 1
 symbolCount :: Symbol
 symbolCount = Symbol 2
 
-paramVariable :: Symbol
-paramVariable = Symbol 3
-
 halfQuoteSymbol :: Symbol
 halfQuoteSymbol = Symbol 3
 
@@ -28,3 +25,5 @@ unQuoteListSymbol = Symbol 8
 listSymbol = Symbol 7
 
 restSymbol = Symbol 5
+
+executeCompileTime = Symbol 6

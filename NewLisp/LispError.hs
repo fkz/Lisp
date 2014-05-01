@@ -23,6 +23,7 @@ data LispError =
  |TooMuchVariablesInFunctionApplication [LispValue]
  |TooFewVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
  |TooMuchVariablesInFunctionApplicationSpecial [LispValue] (Maybe Int) (Maybe Int)
+ |MutableUnavailable Ptr
   deriving (Typeable, Show)
 
 

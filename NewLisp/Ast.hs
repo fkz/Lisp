@@ -13,6 +13,8 @@ import {-# SOURCE #-} NewLisp.Environment
 -- a symbol is just an integer
 data Symbol = Symbol Int
   deriving (Ord, Eq, Show)
+newtype Ptr = Ptr Int
+ deriving (Ord, Eq, Show)
 data SymbolData = SymbolData { name :: String }
 
 

@@ -77,7 +77,7 @@ readS = (headMaybe . fst <$>) . flip (read_ebene "") False
     headMaybe (a:_) = Just a
 
 printLisp :: Monad m => Lisp -> LispT r m String
-printLisp Empty = return ""
+printLisp Empty = return "()"
 printLisp (Sym s) = getReadableUniqueName s
 printLisp (Lit l) = return $ show l
 printLisp (Cdr a b) = do

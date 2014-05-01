@@ -1,4 +1,4 @@
-{-# LANGUAGE RankNTypes, FlexibleInstances #-}
+{-# LANGUAGE RankNTypes, FlexibleInstances, TupleSections #-}
 
 module NewLisp.Environment where
 
@@ -12,13 +12,17 @@ import Control.Monad.State
 import TypedErrorHandler
 import Data.Functor
 
+
 -- a value stored in a variable
 data LispValue = NoValue | 
                  Variable Lisp |
+                 Mutable Ptr |
                  Execute LispExecute |
                  Macro LispExecute |
                  SymbolMacro
   deriving Show
+
+
 
 data LispExecute = Special (forall r m . Monad m => Lisp -> LispT r m LispValue)
                  | InterpretedFunction LexicalScope [Symbol] Lisp
@@ -27,19 +31,46 @@ data LispExecute = Special (forall r m . Monad m => Lisp -> LispT r m LispValue)
 
 data LexicalScope = LexicalScope { variables :: Map Symbol LispValue }
 
-type LispT r m = SigT r (StateT (LexicalScope, Map Symbol SymbolData) m)
+data LispState = LispState { lexicalScope :: LexicalScope,
+                             symbolData :: Map Symbol SymbolData,
+                             mutableVar :: Map Ptr LispValue,
+                             dynamicVar :: Map Symbol LispValue}
+
+type LispT r m = SigT r (StateT LispState m)
+
+runLispT :: Monad m => LispT r m r -> m r
+runLispT l = return . fst =<< runStateT (runCodeT l) 
+             (LispState (LexicalScope M.empty) M.empty M.empty M.empty)
 
 
 
-getVar :: Monad m => Symbol -> LispT r m LispValue
-getVar s = do
-  ls <- gets (variables . fst)
+getLexicalVar :: Monad m => Symbol -> LispT r m LispValue
+getLexicalVar s = do
+  ls <- gets (variables . lexicalScope)
   case M.lookup s ls of
     Nothing -> signal (SymbolNotFound s) $> NoValue
     Just x  -> return x
 
+getDynamicVar :: Monad m => Symbol -> LispT r m LispValue
+getDynamicVar s = maybe (signal (SymbolNotFound s) $> NoValue) return 
+                =<< gets (M.lookup s . dynamicVar)
+
+getVar :: Monad m => Symbol -> LispT r m LispValue
+getVar s = handleIf (return . isSymbolNotFound) 
+                  (const (Abort <$> getDynamicVar s)) 
+              (getLexicalVar s)
+  where
+    isSymbolNotFound (SymbolNotFound _) = Just ()
+    isSymbolNotFound _ = Nothing
+
+
 setVar :: Monad m => Symbol -> LispValue -> LispT r m ()
-setVar k v = state $ \ (map, r) -> ((), (LexicalScope $ M.insert k v (variables map), r))
+setVar k v = state $ \ s -> ((), 
+               s{lexicalScope = LexicalScope $ M.insert k v (variables (lexicalScope s))})
+
+setDynamicVar :: Monad m => Symbol -> LispValue -> LispT r m ()
+setDynamicVar k v = state $ \ s -> ((),)
+                    s{dynamicVar = M.insert k v (dynamicVar s)}
 
 
 newSymbol :: Monad m => String -> LispT r m Symbol
@@ -52,23 +83,23 @@ newSymbol s = do
 
 setSymbolData :: Monad m => SymbolData -> Symbol -> LispT r m ()
 setSymbolData d symbol = do
-  state $ \ (a, m) -> ((), (a, M.insert symbol d m))
+  state $ \ s -> ((), s{ symbolData = M.insert symbol d (symbolData s) })
 
 getName :: Monad m => Symbol -> LispT r m String
 getName s = do
-  (_, d) <- get
+  d <- gets symbolData
   case M.lookup s d of
     Just j -> return (name j)
     Nothing -> signal (SymbolNotValid s) $> ""
 
 getReadableUniqueName :: Monad m => Symbol -> LispT r m String
-getReadableUniqueName s = do
+getReadableUniqueName s@(Symbol r) = do
   name <- getName s
   s' <- getSymbol name
   if s == s' then
       return name
   else
-      return $ "#" ++ show s ++ name
+      return $ "#" ++ show r ++ name
 
 
 -- the reader : is saved in the 0-th symbol
@@ -84,17 +115,17 @@ getSymbol s = do
       return symbol
 
 getScope :: Monad m => LispT r m LexicalScope
-getScope = fst <$> get
+getScope = lexicalScope <$> get
   
 withLexicalScope :: Monad m => LexicalScope -> LispT r m a -> LispT r m a
 withLexicalScope scope run = do
-    (scopeBefore,r) <- get
+    before <- get
 
     finally (do
-              (_,r) <- get
-              put (scopeBefore, r))
+              now <- get
+              put now{ lexicalScope = lexicalScope before })
       $ do
-        put (scope,r)
+        put before{ lexicalScope = scope }
         run
 
 
@@ -107,8 +138,19 @@ lispToList Empty = return []
 lispToList a = signal (NoRealList a) $> []
 
 
+readMutable :: Monad m => Ptr -> LispT r m LispValue
+readMutable a = do
+  map <- gets mutableVar
+  case M.lookup a map of
+    Just v -> return v
+    Nothing -> signal (MutableUnavailable a) $> NoValue
 
+writeMutable :: Monad m => Ptr -> LispValue -> LispT r m ()
+writeMutable a v = 
+  state $ \ s -> ((),) s{ mutableVar = M.insert a v (mutableVar s) }
 
+newMutable :: Monad m => LispT r m Ptr
+newMutable = gets (Ptr . M.size . mutableVar)
 
 
 instance Show LispExecute where
@@ -138,5 +180,17 @@ instance FromToLisp Symbol where
 
 instance FromToLisp Lisp where
     convertFromLisp _ (Variable s) = return s
+    convertFromLisp m (Mutable s) = convertFromLisp m =<< readMutable s
     convertFromLisp s v = signal (TypeMismatch v s) $> Empty
     convertToLisp = Variable
+
+instance FromToLisp LispExecute where
+    convertFromLisp _ (Execute s) = return s
+    convertFromLisp s v = signal (TypeMismatch v s) $> undefined
+    convertToLisp = Execute
+
+instance FromToLisp String where
+    convertFromLisp _ (Variable (Lit (Str s))) = return s
+    convertFromLisp _ (Variable (Sym s)) = getName s
+    convertFromLisp s v = signal (TypeMismatch v s) $> ""
+    convertToLisp = Variable . Lit . Str

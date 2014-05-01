@@ -21,12 +21,13 @@ import Data.Typeable
 import System.IO
 import System.IO.Error
 import Control.Exception
+import NewLisp.ErrorMessages
 
 
 addFunction :: String -> LispExecute -> Monad m => LispT r m ()
 addFunction s l = do
   symbol <- getSymbol s
-  setVar symbol (Execute l)
+  setDynamicVar symbol (Execute l)
 
 
 startEnvironment :: Monad m => LispT r m ()
@@ -34,7 +35,6 @@ startEnvironment = do
   setVar symbolList (convertToLisp (M.fromList startList))
   setVar standardErrorSymbol NoValue
   setVar symbolCount (convertToLisp (10 :: Int))
-  setVar paramVariable NoValue
 
   mapM_ (\(n, s) -> setSymbolData (SymbolData n) s) startList'
 
@@ -47,19 +47,19 @@ startEnvironment = do
       startList = flip map startList' $ \(a, b) -> (a, Variable $ Sym b)
       startList' = [("SymbolList", symbolList),
                    ("SymbolCount", symbolCount),
-                   ("$", paramVariable),
                    ("list", listSymbol),
                    ("`", halfQuoteSymbol),
                    ("@", unQuoteListSymbol),
                    (",", unQuoteSymbol),
                    ("concat", concatSymbol),
-                   ("&rest", restSymbol)]
+                   ("&rest", restSymbol),
+                   ("executeCompileTime", executeCompileTime)]
 
       funs = [("printS", printSpecial),
               ("let", letSpecial),
               ("lambda", lambdaSpecial),
               ("macrolambda", macroLambdaSpecial),
-              ("set", setSpecial),
+              ("%set", setSpecial),
               ("quote", quote),
               ("list", list),
               ("list*", list_),
@@ -68,10 +68,12 @@ startEnvironment = do
               ("cond", condSpecial),
               ("cat", catSpecial),
               ("cdr", cdrSpecial),
-              ("listp", listpSpecial)]
+              ("listp", listpSpecial),
+              ("emptyp", emptypSpecial),
+              ("%addcontext", addContextSpecial),
+              ("genSym", genSymSpecial),
+              ("symbolInt", symbolInt)]
 
-runLispT :: Monad m => LispT r m r -> m r
-runLispT l = return . fst =<< runStateT (runCodeT l) (LexicalScope M.empty, M.empty)
 
 
 runLisp :: LispT (Either LispError r) Identity r -> Either LispError r
@@ -88,36 +90,4 @@ instance IsSignal Quit ()
 boolToMaybe :: Bool -> Maybe ()
 boolToMaybe True = Just ()
 boolToMaybe False = Nothing
-
-nextRepl :: LispT r IO ()
-nextRepl = do
-  liftIO $ putStr ">" >> hFlush stdout
-  str <- liftIO $ handleJust (boolToMaybe . isEOFError) (return . const "quit") getLine
-  if str == "quit" then
-      signal Quit
-  else if str == "abort" then
-     return ()
-  else 
-      registerHandlerT (undefined :: LispError)
-           ((Abort () <$) . liftIO . print) $
-      registerHandlerT NotFinnishedReading 
-           (const $ liftIO $ putStr "==>" >> hFlush stdout >> Continue <$> getLine) $
-      void $ runMaybeT $
-       MaybeT (readS str) >>= 
-       lift . compile True >>= 
-       lift . execute >>= 
-       lift . lispToString >>= 
-       liftIO . putStr >> 
-       liftIO (putStrLn "")
-          where
-            lispToString (Variable w) = printLisp w
-            lispToString q = return $ show q
-
-
-
-repl :: IO ()
-repl = runLispT $ do
-         startEnvironment
-         registerHandlerT Quit (const $ return $ Abort ()) $
-           forever nextRepl
 
